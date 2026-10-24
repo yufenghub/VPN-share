@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="VPN share">
+  <title>VPN share</title>
+  <rect width="128" height="128" fill="#fff"/>
+  <g transform="rotate(24 64 64)"><path d="M64 23H81Q85 23 85 27V101Q85 105 81 105H64C50 105 43 95 43 82V46C43 32 50 23 64 23Z" fill="none" stroke="#000" stroke-width="5.5" stroke-linejoin="round"/><g fill="none" stroke="#000" stroke-width="4.3" stroke-linecap="round">
+      <path d="M51 46Q64 34 77 46"/>
+      <path d="M57 53Q64 47 71 53"/>
+    </g><circle cx="64" cy="59" r="3" fill="#000"/><circle cx="64" cy="85" r="6" fill="#000"/></g>
+</svg>

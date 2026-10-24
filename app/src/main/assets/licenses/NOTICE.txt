@@ -1,0 +1,18 @@
+HotspotShare / 热点通 1.0.0
+
+This private test build is derived from Shizzi v0.4.0-rc.3 by carlelieser.
+https://github.com/carlelieser/shizzi/tree/v0.4.0-rc.3
+Upstream commit: 4f8f049a2090db25fa7346c1581d9d4b59351d2a
+Shizzi's source, authorship, and upstream README are retained in the accompanying source archive.
+
+The native datapath includes the Go runtime (The Go Authors), gomobile
+(The Go Authors), gVisor (The gVisor Authors), google/btree (Google Inc.),
+and golang.org/x packages. Their license texts accompany this notice.
+
+The application also uses AndroidX and Material libraries (Android Open Source
+Project), Shizuku API/provider (Rikka), HiddenApiBypass (LSPosed contributors),
+and material-color-utilities. These libraries use the Apache License, Version 2.0;
+the full license text is included as gvisor.dev_gvisor-LICENSE.txt.
+
+Font license texts from the upstream repository are preserved alongside these
+notices. This is an independent local build, not an official Shizzi release.

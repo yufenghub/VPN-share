@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.22.1)
+project(spake2 C)
+add_library(spake2 SHARED spake2-c/sha512.c spake2-c/spake2.c spake2_jni.c)
+target_include_directories(spake2 PRIVATE spake2-c/include)
+target_compile_options(spake2 PRIVATE -O2 -fvisibility=hidden -fstack-protector-strong)
+target_link_options(spake2 PRIVATE -Wl,-z,max-page-size=16384 -Wl,-z,relro -Wl,-z,now)
