@@ -65,7 +65,7 @@ class TetherSession(private val context: Context) {
         followVpn(group)
 
         preferTestNetworks()
-        restartDownstream()
+        ensureDownstreamStarted()
 
         verifyUpstream(name)
         SessionLog.info("upstream verified: $name is sole upstream")
@@ -118,12 +118,17 @@ class TetherSession(private val context: Context) {
         api.setPreferTestNetworks(true)
     }
 
-    private fun restartDownstream() {
+    private fun ensureDownstreamStarted() {
         val control = DownstreamControl(context)
-        control.stopWifiTethering()
-
-        val (didStart, startDetail) = control.startWifiTethering()
-        check(didStart) { "restartDownstream: hotspot did not start ($startDetail)" }
+        if (control.isWifiHotspotStarted()) {
+            SessionLog.info("Wi-Fi hotspot already enabled or enabling; reusing downstream")
+        } else {
+            val (didStart, startDetail) = control.startWifiTethering()
+            // The user or system may have enabled it between the state read and start request.
+            check(didStart || control.isWifiHotspotStarted()) {
+                "ensureDownstreamStarted: hotspot did not start ($startDetail)"
+            }
+        }
 
         awaitDownstreamTethered()
     }

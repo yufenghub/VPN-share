@@ -1,6 +1,7 @@
 package dev.shizzi
 
 import android.content.Context
+import android.content.IntentFilter
 import android.os.Handler
 import android.os.Looper
 import java.util.concurrent.CountDownLatch
@@ -47,6 +48,23 @@ class DownstreamControl(private val context: Context) {
     private val managerClass: Class<*> get() = Class.forName("android.net.TetheringManager")
 
     private val wifiTetheringType = 0
+
+    fun isWifiHotspotStarted(): Boolean {
+        val queriedState = runCatching {
+            val wifiManager = context.getSystemService(Context.WIFI_SERVICE)
+                ?: error("wifi service unavailable")
+            wifiManager.javaClass.getMethod("getWifiApState").invoke(wifiManager) as Int
+        }.getOrNull()
+        // A null receiver only reads the system's sticky state; no receiver is registered.
+        val state = queriedState ?: runCatching {
+            context.registerReceiver(null, IntentFilter("android.net.wifi.WIFI_AP_STATE_CHANGED"))
+                ?.getIntExtra("wifi_state", -1)
+        }.getOrNull()
+        if (state == null || state == -1) {
+            SessionLog.warn("Wi-Fi hotspot state unavailable; requesting start without stopping")
+        }
+        return state == WIFI_AP_STATE_ENABLED || state == WIFI_AP_STATE_ENABLING
+    }
 
     fun stopWifiTethering(): Boolean = runCatching {
         val method = managerClass.getMethod("stopTethering", Int::class.javaPrimitiveType)
@@ -178,6 +196,8 @@ class DownstreamControl(private val context: Context) {
     }
 
     private companion object {
+        const val WIFI_AP_STATE_ENABLING = 12
+        const val WIFI_AP_STATE_ENABLED = 13
         const val SUCCESS = "onTetheringStarted"
         const val STOP_SETTLE_MS = 3_000L
         const val START_TIMEOUT_MS = 15_000L
