@@ -10,6 +10,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -25,7 +26,7 @@ import kotlinx.coroutines.launch
 
 class SessionService : Service() {
 
-    private val scope = CoroutineScope(SupervisorJob())
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val controller = TetherClient()
     private val notification by lazy { SessionNotification(this) }
     private val statusPoller = SessionStatusPoller(scope, controller)
@@ -44,11 +45,12 @@ class SessionService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        controller.onSessionLost = ::handleSessionLost
+        controller.onSessionLost = { scope.launch { handleSessionLost() } }
         liveService = this
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (internalState.value.isStopping) return START_NOT_STICKY
         isStopping = intent?.action == ACTION_STOP
         reportTo = intent?.getStringExtra(EXTRA_REPORT_AS)
             ?.let { runCatching { AutomationCommand.valueOf(it) }.getOrNull() }
@@ -99,17 +101,33 @@ class SessionService : Service() {
             internalState.update { current -> current.applyOutcome(outcome) }
             publishState()
             announceOutcome()
-            followStatus()
+            if (internalState.value.status == UiStatus.CONNECTED) followStatus()
+            else finishForegroundSession()
         }
     }
 
-    private fun followStatus() = statusPoller.follow(
-        isConnected = { internalState.value.status == UiStatus.CONNECTED },
-        onStatus = { outcome ->
-            internalState.update { current -> current.applyOutcome(outcome) }
+    private fun followStatus() {
+        val attempt = generation
+        statusPoller.follow(
+            isConnected = { attempt == generation && internalState.value.status == UiStatus.CONNECTED },
+            onStatus = onStatus@ { outcome ->
+                if (attempt != generation) return@onStatus
+                internalState.update { current -> current.applyOutcome(outcome) }
+                if (internalState.value.status == UiStatus.READY || internalState.value.status == UiStatus.ERROR) {
+                    statusPoller.stop()
+                    finishForegroundSession()
+                } else publishState()
+            },
+        )
+    }
+
+    private fun finishForegroundSession() {
+        if (internalState.value.status == UiStatus.ERROR) {
             publishState()
-        },
-    )
+            stopForeground(STOP_FOREGROUND_DETACH)
+        } else stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
 
     private fun settingsStore(): SettingsStore =
         (application as App).settingsStore
@@ -123,7 +141,7 @@ class SessionService : Service() {
         statusPoller.stop()
 
         internalState.update {
-            it.asStopped()
+            it.copy(isBusy = true, isStopping = true, status = UiStatus.LOADING, lastError = "")
         }
 
         publishState()
@@ -132,16 +150,20 @@ class SessionService : Service() {
 
             abandoned?.cancelAndJoin()
 
-            sessionLock.withLock {
-                runCatching { controller.stop() }
+            val outcome = sessionLock.withLock {
+                val result = runCatching { controller.stop() }
                     .onFailure { SessionLog.error("teardown failed: ${it.message}") }
 
                 controller.unbindAndStopDaemon()
+                result
             }
 
+            if (stopped != generation) return@launch
+            isStopping = false
+            internalState.update { current -> current.applyOutcome(outcome) }
             announceOutcome()
 
-            if (stopped == generation) stopSelf()
+            finishForegroundSession()
         }
     }
 

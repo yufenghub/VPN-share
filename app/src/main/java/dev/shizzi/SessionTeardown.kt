@@ -86,11 +86,18 @@ class SessionTeardown(private val context: Context) {
     fun releaseDownstream(): String? {
         val control = DownstreamControl(context)
         val inspector = DownstreamInspector()
+        if (control.wifiHotspotState().isStopped) return null
 
         return releaseDownstreamWith(
             stop = { attemptStop(control) },
             findTethered = {
-                runCatching { inspector.findTetheredDownstream() }
+                runCatching {
+                    when (val state = control.wifiHotspotState()) {
+                        WifiHotspotState.DISABLING, WifiHotspotState.DISABLED, WifiHotspotState.FAILED -> null
+                        WifiHotspotState.UNKNOWN -> inspector.findTetheredDownstream()
+                        else -> "Wi-Fi hotspot still $state"
+                    }
+                }
                     .getOrElse { failure -> "could not verify downstream: ${failure.message}" }
             },
             onRetry = SessionLog::warn,

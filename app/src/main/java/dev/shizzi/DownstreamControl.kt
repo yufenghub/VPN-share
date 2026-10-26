@@ -49,7 +49,7 @@ class DownstreamControl(private val context: Context) {
 
     private val wifiTetheringType = 0
 
-    fun isWifiHotspotStarted(): Boolean {
+    fun wifiHotspotState(): WifiHotspotState {
         val queriedState = runCatching {
             val wifiManager = context.getSystemService(Context.WIFI_SERVICE)
                 ?: error("wifi service unavailable")
@@ -60,10 +60,12 @@ class DownstreamControl(private val context: Context) {
             context.registerReceiver(null, IntentFilter("android.net.wifi.WIFI_AP_STATE_CHANGED"))
                 ?.getIntExtra("wifi_state", -1)
         }.getOrNull()
-        if (state == null || state == -1) {
-            SessionLog.warn("Wi-Fi hotspot state unavailable; requesting start without stopping")
-        }
-        return state == WIFI_AP_STATE_ENABLED || state == WIFI_AP_STATE_ENABLING
+        return WifiHotspotState.fromPlatform(state)
+    }
+
+    fun isWifiHotspotStarted(): Boolean {
+        val state = wifiHotspotState()
+        return state == WifiHotspotState.ENABLED || state == WifiHotspotState.ENABLING
     }
 
     fun stopWifiTethering(): Boolean = runCatching {
@@ -196,8 +198,6 @@ class DownstreamControl(private val context: Context) {
     }
 
     private companion object {
-        const val WIFI_AP_STATE_ENABLING = 12
-        const val WIFI_AP_STATE_ENABLED = 13
         const val SUCCESS = "onTetheringStarted"
         const val STOP_SETTLE_MS = 3_000L
         const val START_TIMEOUT_MS = 15_000L

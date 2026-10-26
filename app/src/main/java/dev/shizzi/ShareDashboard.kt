@@ -105,6 +105,7 @@ fun ShareDashboard(
             else -> "未配对"
         }
         val action = when {
+            state.isStopping -> "停止中"
             connected -> "停止共享"
             busy -> "取消启动"
             !ready -> "ADB 设置"
@@ -129,6 +130,7 @@ fun ShareDashboard(
                     Surface(
                         onClick = {
                             when {
+                                state.isStopping -> Unit
                                 connected -> onToggle()
                                 busy -> onCancel()
                                 !ready -> onShizuku()
@@ -148,6 +150,7 @@ fun ShareDashboard(
                                 null, Modifier.size(32.dp))
                             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 Text(when {
+                                    state.isStopping -> "停止中"
                                     connected -> "运行中"
                                     busy -> "启动中"
                                     state.status == UiStatus.ERROR -> "错误"

@@ -20,6 +20,7 @@ data class SessionUiState(
     val clientCount: Int = 0,
 
     val traffic: Traffic = Traffic(),
+    val isStopping: Boolean = false,
 ) {
 
     val canStart: Boolean get() = shizukuState is ShizukuState.Ready && !isBusy
@@ -27,6 +28,7 @@ data class SessionUiState(
 
 fun SessionUiState.asStopped(): SessionUiState = copy(
     isBusy = false,
+    isStopping = false,
     status = UiStatus.READY,
     lastError = "",
     detail = "Stopped",
@@ -42,6 +44,7 @@ fun SessionUiState.applyOutcome(outcome: Result<String>): SessionUiState {
     if (failure != null) {
         return copy(
             isBusy = false,
+            isStopping = false,
             status = UiStatus.ERROR,
             lastError = "${failure.javaClass.simpleName}: ${failure.message}",
 
@@ -59,6 +62,7 @@ fun SessionUiState.applyOutcome(outcome: Result<String>): SessionUiState {
 
     return copy(
         isBusy = false,
+        isStopping = false,
         status = statusFor(sessionState),
         detail = sessionDetail,
         interfaceName = parsed?.optString("interface").orEmpty().takeIf { it != "null" }.orEmpty(),

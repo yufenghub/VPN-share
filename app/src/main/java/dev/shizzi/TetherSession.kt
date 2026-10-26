@@ -2,8 +2,10 @@ package dev.shizzi
 
 import android.content.Context
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import org.json.JSONObject
+import java.util.concurrent.atomic.AtomicBoolean
 
 enum class SessionState { IDLE, STARTING, ACTIVE, ERROR }
 
@@ -20,15 +22,23 @@ class TetherSession(private val context: Context) {
     private var activeSince: Long = 0
     private var vpnMode = VpnMode.AUTO
     private var watchdog: SessionWatchdog? = null
+    private var hotspotWatchdog: HotspotWatchdog? = null
+    private var generation = 0L
+    private var hotspotClosed = AtomicBoolean(false)
+    private val control = DownstreamControl(context)
     private val teardown = SessionTeardown(context)
     private val downstream = DownstreamInspector()
-    private val vpn = VpnUpstream(context) { problem -> tearDownAfter(problem) }
+    private var vpn = createVpnMonitor(0)
 
     val isActive: Boolean get() = state == SessionState.ACTIVE
 
+    @Synchronized
     fun start(mode: VpnMode = VpnMode.AUTO): String {
         if (isActive) return status()
 
+        generation++
+        hotspotClosed = AtomicBoolean(false)
+        vpn = createVpnMonitor(generation)
         vpnMode = mode
         state = SessionState.STARTING
         SessionLog.info("session start requested (vpn mode ${mode.name.lowercase()})")
@@ -41,34 +51,47 @@ class TetherSession(private val context: Context) {
 
         return runCatching { bringUp() }
             .getOrElse { failure ->
-                Log.e(TAG, "start failed", failure)
-                SessionLog.error(
-                    "start failed: ${failure.javaClass.simpleName}: ${failure.message}",
-                )
-                stop()
-                state = SessionState.ERROR
-                detail = "${failure.javaClass.simpleName}: ${failure.message}"
+                if (failure !is HotspotClosedException) {
+                    Log.e(TAG, "start failed", failure)
+                    SessionLog.error(
+                        "start failed: ${failure.javaClass.simpleName}: ${failure.message}",
+                    )
+                }
+                finishSession(closeHotspot = failure !is HotspotClosedException)
+                if (failure is HotspotClosedException) {
+                    detail = "热点已关闭"
+                } else {
+                    state = SessionState.ERROR
+                    detail = "${failure.javaClass.simpleName}: ${failure.message}"
+                }
                 status()
             }
     }
 
     private fun bringUp(): String {
+        check(vpnMode != VpnMode.ALWAYS || vpn.isVpnPresent()) { "请先连接 VPN，再开启共享。" }
+        ensureDownstreamStarted()
+        startHotspotWatchdog(generation, hotspotClosed)
+        requireHotspotOpen()
+
         val group = SessionResources(testNetworkApi, context.connectivityManager())
         resources = group
 
         val name = group.acquire(tunAddresses(), TEST_NETWORK_DNS_SERVERS, AVAILABILITY_TIMEOUT_MS)
         interfaceName = name
         SessionLog.info("tun up: $name (mtu $TUN_MTU, $TUN_ADDRESS, $TUN_ADDRESS_V6)")
+        requireHotspotOpen()
 
         group.startDatapath(TUN_MTU)
         SessionLog.info("datapath attached to $name")
         followVpn(group)
 
+        requireHotspotOpen()
         preferTestNetworks()
-        ensureDownstreamStarted()
 
         verifyUpstream(name)
         SessionLog.info("upstream verified: $name is sole upstream")
+        requireHotspotOpen()
 
         state = SessionState.ACTIVE
         activeSince = System.currentTimeMillis()
@@ -92,12 +115,58 @@ class TetherSession(private val context: Context) {
     }
 
     private fun startWatchdog(name: String) {
+        val attempt = generation
         val guard = SessionWatchdog(name) { problem ->
-            SessionLog.warn("upstream drift: $problem")
-            tearDownAfter(problem)
+            synchronized(this) {
+                if (attempt == generation && isActive) {
+                    val hotspot = control.wifiHotspotState()
+                    if (hotspot.isStopped) onHotspotStopped(hotspot)
+                    else {
+                        SessionLog.warn("upstream drift: $problem")
+                        tearDownAfter(problem)
+                    }
+                }
+            }
         }
         watchdog = guard
         guard.start()
+    }
+
+    private fun createVpnMonitor(attempt: Long) = VpnUpstream(context) { problem ->
+        synchronized(this) {
+            if (attempt == generation && state != SessionState.IDLE) {
+                val hotspot = control.wifiHotspotState()
+                if (hotspot.isStopped) onHotspotStopped(hotspot) else tearDownAfter(problem)
+            }
+        }
+    }
+
+    private fun startHotspotWatchdog(attempt: Long, closed: AtomicBoolean) {
+        val guard = HotspotWatchdog(context, control) { observed ->
+            // Mark cancellation before taking the lock, so startup can stop between steps.
+            closed.set(true)
+            synchronized(this) {
+                if (attempt == generation && state != SessionState.IDLE) onHotspotStopped(observed)
+            }
+        }
+        hotspotWatchdog = guard
+        guard.start()
+    }
+
+    private fun onHotspotStopped(observed: WifiHotspotState) {
+        SessionLog.info("Wi-Fi hotspot closed; stopping sharing")
+        finishSession(closeHotspot = false)
+        detail = "热点已关闭"
+        if (observed == WifiHotspotState.FAILED) {
+            state = SessionState.ERROR
+            detail = "系统热点异常，已停止共享。"
+        }
+    }
+
+    private fun requireHotspotOpen() {
+        val observed = control.wifiHotspotState()
+        check(observed != WifiHotspotState.FAILED) { "系统热点异常" }
+        if (hotspotClosed.get() || observed.isStopped) throw HotspotClosedException()
     }
 
     private fun tearDownAfter(problem: String) {
@@ -119,8 +188,14 @@ class TetherSession(private val context: Context) {
     }
 
     private fun ensureDownstreamStarted() {
-        val control = DownstreamControl(context)
-        if (control.isWifiHotspotStarted()) {
+        val deadline = SystemClock.elapsedRealtime() + DOWNSTREAM_SETTLE_MS
+        var observed = control.wifiHotspotState()
+        // A start issued while the previous AP is disabling can otherwise be rejected.
+        while (observed == WifiHotspotState.DISABLING && SystemClock.elapsedRealtime() < deadline) {
+            Thread.sleep(DOWNSTREAM_POLL_MS)
+            observed = control.wifiHotspotState()
+        }
+        if (observed == WifiHotspotState.ENABLED || observed == WifiHotspotState.ENABLING) {
             SessionLog.info("Wi-Fi hotspot already enabled or enabling; reusing downstream")
         } else {
             val (didStart, startDetail) = control.startWifiTethering()
@@ -130,23 +205,27 @@ class TetherSession(private val context: Context) {
             }
         }
 
-        awaitDownstreamTethered()
+        awaitDownstreamReady()
     }
 
-    private fun awaitDownstreamTethered() {
-        val deadline = System.currentTimeMillis() + DOWNSTREAM_SETTLE_MS
-        val downstream = DownstreamInspector()
-
-        while (System.currentTimeMillis() < deadline) {
-
-            if (downstream.findTetheredDownstream() != null) {
-                SessionLog.info("downstream tethered")
-                return
+    private fun awaitDownstreamReady() {
+        val deadline = SystemClock.elapsedRealtime() + DOWNSTREAM_SETTLE_MS
+        var sawEnabling = false
+        while (SystemClock.elapsedRealtime() < deadline) {
+            when (control.wifiHotspotState()) {
+                WifiHotspotState.ENABLED -> {
+                    SessionLog.info("Wi-Fi hotspot ready")
+                    return
+                }
+                WifiHotspotState.ENABLING -> sawEnabling = true
+                WifiHotspotState.DISABLING -> throw HotspotClosedException()
+                WifiHotspotState.DISABLED -> if (sawEnabling) throw HotspotClosedException()
+                WifiHotspotState.FAILED -> error("热点启动失败")
+                WifiHotspotState.UNKNOWN -> Unit
             }
             Thread.sleep(DOWNSTREAM_POLL_MS)
         }
-
-        SessionLog.warn("downstream not tethered after ${DOWNSTREAM_SETTLE_MS}ms; continuing")
+        error("等待热点开启超时，请检查系统热点设置。")
     }
 
     private fun verifyUpstream(name: String) {
@@ -154,6 +233,7 @@ class TetherSession(private val context: Context) {
         var observed = liveUpstreams(name)
 
         while (System.currentTimeMillis() < deadline) {
+            requireHotspotOpen()
             if (observed.isNotEmpty() && observed.all { it == name }) return
             Thread.sleep(UPSTREAM_POLL_MS)
             observed = liveUpstreams(name)
@@ -164,7 +244,16 @@ class TetherSession(private val context: Context) {
     private fun liveUpstreams(owned: String): List<String> =
         inspector.observe().liveInterfaceNames(owned)
 
+    @Synchronized
     fun stop(): String {
+        finishSession(closeHotspot = true)
+        return status()
+    }
+
+    private fun finishSession(closeHotspot: Boolean) {
+        generation++
+        hotspotWatchdog?.stop()
+        hotspotWatchdog = null
         watchdog?.stop()
         watchdog = null
         vpn.stop()
@@ -172,9 +261,10 @@ class TetherSession(private val context: Context) {
 
         val summary = if (activeSince == 0L) null else sessionSummary()
 
-        val downstreamProblem = teardown.releaseDownstream()
+        val downstreamProblem = if (closeHotspot) teardown.releaseDownstream() else null
 
-        teardown.releaseUpstreamSelection(interfaceName)
+        // No downstream is using the TUN after a normal stop, so no route-settle wait is needed.
+        teardown.releaseUpstreamSelection(if (downstreamProblem == null) null else interfaceName)
 
         val releaseProblems = resources?.release().orEmpty()
         resources = null
@@ -192,7 +282,6 @@ class TetherSession(private val context: Context) {
             SessionLog.warn("${releaseProblems.size} resource(s) not released cleanly")
         }
         summary?.let(SessionLog::info)
-        return status()
     }
 
     private fun sessionSummary(): String {
@@ -219,7 +308,13 @@ class TetherSession(private val context: Context) {
         }
     }
 
-    fun status(): String = JSONObject().apply {
+    @Synchronized
+    fun status(): String {
+        if (isActive) {
+            val observed = control.wifiHotspotState()
+            if (observed.isStopped || hotspotClosed.get()) onHotspotStopped(observed)
+        }
+        return JSONObject().apply {
         put("state", state.name)
         put("detail", detail)
         put("interface", interfaceName ?: JSONObject.NULL)
@@ -231,7 +326,8 @@ class TetherSession(private val context: Context) {
         put("bytesUp", traffic.up)
         put("bytesDown", traffic.down)
         put("clientCount", if (isActive) downstream.countDevices() else 0)
-    }.toString()
+        }.toString()
+    }
 
     private fun isVpnBypassed(): Boolean {
         if (vpnMode != VpnMode.NEVER) return false
@@ -258,7 +354,7 @@ class TetherSession(private val context: Context) {
         const val UPSTREAM_SETTLE_MS = 8_000L
         const val UPSTREAM_POLL_MS = 500L
 
-        const val DOWNSTREAM_SETTLE_MS = 10_000L
-        const val DOWNSTREAM_POLL_MS = 500L
+        const val DOWNSTREAM_SETTLE_MS = 20_000L
+        const val DOWNSTREAM_POLL_MS = 200L
     }
 }
