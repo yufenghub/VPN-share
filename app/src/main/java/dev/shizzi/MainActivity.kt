@@ -52,9 +52,7 @@ class MainActivity : ComponentActivity() {
                 while (isActive) {
                     delay(3000)
                     val access = AdbAccess.state.value
-                    if (!access.busy && (access.paired || access.connected)) {
-                        if (!AdbAccess.probe() && AdbAccess.paired) AdbAccess.reconnect()
-                    }
+                    if (!access.busy && access.paired && !SessionService.isSessionBusy) AdbAccess.reconnect()
                 }
             }
         }

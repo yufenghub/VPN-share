@@ -28,7 +28,7 @@ object ShellServerMain {
         require(installed.uid == ownerUid && installed.sourceDir == args[0])
         val service = TetherService(context)
         val server = ShellTransport.listen(token)
-        val requests = java.util.concurrent.ThreadPoolExecutor(2, 2, 0L, TimeUnit.MILLISECONDS,
+        val requests = java.util.concurrent.ThreadPoolExecutor(4, 4, 0L, TimeUnit.MILLISECONDS,
             java.util.concurrent.ArrayBlockingQueue<Runnable>(8))
         val lifecycle = Executors.newSingleThreadScheduledExecutor()
         fun shutdown() {
@@ -39,8 +39,11 @@ object ShellServerMain {
         }
         Runtime.getRuntime().addShutdownHook(Thread { runCatching { service.stop() } })
         lifecycle.scheduleWithFixedDelay({
-            val current = runCatching { context.packageManager.getApplicationInfo(packageName, 0) }.getOrNull()
-            if (current?.uid != ownerUid || current.sourceDir != args[0]) shutdown()
+            val lookup = runCatching { context.packageManager.getApplicationInfo(packageName, 0) }
+            val current = lookup.getOrNull()
+            // A transient PackageManager/Binder failure does not mean the owner was removed.
+            if (lookup.exceptionOrNull() is android.content.pm.PackageManager.NameNotFoundException ||
+                (current != null && (current.uid != ownerUid || current.sourceDir != args[0]))) shutdown()
         }, 5, 5, TimeUnit.SECONDS)
         Thread({
             while (true) {

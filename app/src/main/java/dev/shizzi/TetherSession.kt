@@ -23,6 +23,7 @@ class TetherSession(private val context: Context) {
     private var vpnMode = VpnMode.AUTO
     private var watchdog: SessionWatchdog? = null
     private var hotspotWatchdog: HotspotWatchdog? = null
+    private var upstreamMonitor: TetheringUpstreamMonitor? = null
     private var generation = 0L
     private var hotspotClosed = AtomicBoolean(false)
     private val control = DownstreamControl(context)
@@ -70,26 +71,35 @@ class TetherSession(private val context: Context) {
 
     private fun bringUp(): String {
         check(vpnMode != VpnMode.ALWAYS || vpn.isVpnPresent()) { "请先连接 VPN，再开启共享。" }
-        ensureDownstreamStarted()
-        startHotspotWatchdog(generation, hotspotClosed)
-        requireHotspotOpen()
-
         val group = SessionResources(testNetworkApi, context.connectivityManager())
         resources = group
 
         val name = group.acquire(tunAddresses(), TEST_NETWORK_DNS_SERVERS, AVAILABILITY_TIMEOUT_MS)
         interfaceName = name
         SessionLog.info("tun up: $name (mtu $TUN_MTU, $TUN_ADDRESS, $TUN_ADDRESS_V6)")
-        requireHotspotOpen()
 
         group.startDatapath(TUN_MTU)
         SessionLog.info("datapath attached to $name")
         followVpn(group)
 
-        requireHotspotOpen()
+        upstreamMonitor = runCatching {
+            TetheringUpstreamMonitor(context, checkNotNull(group.acquiredNetwork), name).also { monitor ->
+                try { monitor.start() } catch (failure: Exception) { monitor.close(); throw failure }
+            }
+        }.onFailure { SessionLog.warn("upstream callback unavailable; using dumpsys") }.getOrNull()
         preferTestNetworks()
 
-        verifyUpstream(name)
+        ensureDownstreamStarted()
+        startHotspotWatchdog(generation, hotspotClosed)
+        requireHotspotOpen()
+        check(confirmTetheringUpstream(
+            checkSelected = { awaitUpstream(name) },
+            recoverOnce = {
+                requireHotspotOpen()
+                SessionLog.warn("upstream did not switch; restarting Wi-Fi hotspot once")
+                restartHotspotForHandover()
+            },
+        )) { "verifyUpstream: test network was not selected after hotspot recovery" }
         SessionLog.info("upstream verified: $name is sole upstream")
         requireHotspotOpen()
 
@@ -116,7 +126,7 @@ class TetherSession(private val context: Context) {
 
     private fun startWatchdog(name: String) {
         val attempt = generation
-        val guard = SessionWatchdog(name) { problem ->
+        val guard = SessionWatchdog(name, observe = ::observeUpstream) { problem ->
             synchronized(this) {
                 if (attempt == generation && isActive) {
                     val hotspot = control.wifiHotspotState()
@@ -142,11 +152,12 @@ class TetherSession(private val context: Context) {
     }
 
     private fun startHotspotWatchdog(attempt: Long, closed: AtomicBoolean) {
-        val guard = HotspotWatchdog(context, control) { observed ->
+        lateinit var guard: HotspotWatchdog
+        guard = HotspotWatchdog(context, control) { observed ->
             // Mark cancellation before taking the lock, so startup can stop between steps.
             closed.set(true)
             synchronized(this) {
-                if (attempt == generation && state != SessionState.IDLE) onHotspotStopped(observed)
+                if (attempt == generation && hotspotWatchdog === guard && state != SessionState.IDLE) onHotspotStopped(observed)
             }
         }
         hotspotWatchdog = guard
@@ -228,21 +239,35 @@ class TetherSession(private val context: Context) {
         error("等待热点开启超时，请检查系统热点设置。")
     }
 
-    private fun verifyUpstream(name: String) {
-        val deadline = System.currentTimeMillis() + UPSTREAM_SETTLE_MS
-        var observed = liveUpstreams(name)
-
-        while (System.currentTimeMillis() < deadline) {
+    private fun awaitUpstream(name: String): Boolean {
+        val deadline = SystemClock.elapsedRealtime() + UPSTREAM_SETTLE_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
             requireHotspotOpen()
-            if (observed.isNotEmpty() && observed.all { it == name }) return
+            val observation = observeUpstream()
+            val observed = observation.liveInterfaceNames(name)
+            if (!observation.didTimeout && observed.isNotEmpty() && observed.all { it == name }) return true
             Thread.sleep(UPSTREAM_POLL_MS)
-            observed = liveUpstreams(name)
         }
-        error("verifyUpstream: expected only $name, tethering reports $observed")
+        return false
     }
 
-    private fun liveUpstreams(owned: String): List<String> =
-        inspector.observe().liveInterfaceNames(owned)
+    private fun observeUpstream(): UpstreamObservation = upstreamMonitor?.observe() ?: inspector.observe()
+
+    private fun restartHotspotForHandover() {
+        // Ignore only our deliberate AP transition; an old callback must not stop the recovery.
+        val previous = hotspotWatchdog
+        hotspotWatchdog = null
+        previous?.stop()
+        hotspotClosed = AtomicBoolean(false)
+        check(control.stopWifiTethering()) { "热点恢复失败：无法关闭热点" }
+        val deadline = SystemClock.elapsedRealtime() + DOWNSTREAM_SETTLE_MS
+        while (control.wifiHotspotState() == WifiHotspotState.DISABLING && SystemClock.elapsedRealtime() < deadline) {
+            Thread.sleep(DOWNSTREAM_POLL_MS)
+        }
+        check(control.wifiHotspotState() == WifiHotspotState.DISABLED) { "热点恢复失败：等待热点关闭超时" }
+        ensureDownstreamStarted()
+        startHotspotWatchdog(generation, hotspotClosed)
+    }
 
     @Synchronized
     fun stop(): String {
@@ -262,6 +287,9 @@ class TetherSession(private val context: Context) {
         val summary = if (activeSince == 0L) null else sessionSummary()
 
         val downstreamProblem = if (closeHotspot) teardown.releaseDownstream() else null
+
+        upstreamMonitor?.close()
+        upstreamMonitor = null
 
         // No downstream is using the TUN after a normal stop, so no route-settle wait is needed.
         teardown.releaseUpstreamSelection(if (downstreamProblem == null) null else interfaceName)

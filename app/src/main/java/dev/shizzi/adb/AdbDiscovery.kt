@@ -88,10 +88,10 @@ class AdbDiscovery(context: Context, private val type: String, private val onPor
         const val CONNECT = "_adb-tls-connect._tcp."
         const val PAIRING = "_adb-tls-pairing._tcp."
 
-        fun findPort(context: Context, type: String, timeoutMillis: Long): Int {
+        fun findPort(context: Context, type: String, timeoutMillis: Long, excludedPorts: Set<Int> = emptySet()): Int {
             val latch = CountDownLatch(1)
             val result = AtomicInteger(0)
-            AdbDiscovery(context, type) { port -> if (port in 1..65535) { result.set(port); latch.countDown() } }.use {
+            AdbDiscovery(context, type) { port -> if (port in 1..65535 && port !in excludedPorts) { result.set(port); latch.countDown() } }.use {
                 it.start()
                 check(latch.await(timeoutMillis, TimeUnit.MILLISECONDS)) { "未发现无线调试端口；请开启无线调试" }
             }

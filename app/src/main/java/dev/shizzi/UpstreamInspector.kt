@@ -8,9 +8,11 @@ data class UpstreamObservation(
     val rawOutput: String,
     val interfaceNames: List<String>,
     val didTimeout: Boolean,
+    val authoritative: Boolean = false,
 ) {
 
     fun liveInterfaceNames(owned: String): List<String> {
+        if (authoritative) return interfaceNames
         val (live, absent) = interfaceNames.partition { it == owned || interfaceExists(it) }
         if (absent.isNotEmpty()) {
             SessionLog.warn("ignoring upstream that no longer exists: $absent")

@@ -5,10 +5,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class SessionWatchdog(
     private val expectedInterface: String,
+    private val observe: () -> UpstreamObservation = { UpstreamInspector().observe() },
     private val onDrift: (String) -> Unit,
 ) {
 
-    private val inspector = UpstreamInspector()
     private val isRunning = AtomicBoolean(false)
     private var thread: Thread? = null
 
@@ -50,7 +50,7 @@ class SessionWatchdog(
     }
 
     private fun checkUpstream(): String? {
-        val observation = inspector.observe()
+        val observation = observe()
         val names = observation.liveInterfaceNames(expectedInterface)
         val reading = classifyUpstream(names, expectedInterface, observation.didTimeout)
 
