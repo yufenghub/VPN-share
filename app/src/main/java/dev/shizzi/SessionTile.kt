@@ -15,28 +15,28 @@ object SessionTile {
     const val LABEL = "VPN share"
 
     fun render(session: SessionUiState, shizuku: ShizukuState, isStopping: Boolean): TileRender {
-        if (shizuku !is ShizukuState.Ready) return unavailable(shizuku)
-
-        return when (session.status) {
-            UiStatus.LOADING -> TileRender(
+        return when {
+            session.isBusy || session.isStopping || session.status == UiStatus.LOADING -> TileRender(
                 state = Tile.STATE_UNAVAILABLE,
-                subtitle = if (isStopping) "正在停止…" else "正在启动…",
+                subtitle = if (isStopping || session.isStopping) "正在停止…" else "正在启动…",
                 action = TileAction.NONE,
             )
 
-            UiStatus.CONNECTED -> TileRender(
+            session.status == UiStatus.CONNECTED -> TileRender(
                 state = Tile.STATE_ACTIVE,
                 subtitle = describeConnected(session),
                 action = TileAction.STOP,
             )
 
-            UiStatus.ERROR -> TileRender(
+            shizuku !is ShizukuState.Ready -> needsSetup(shizuku)
+
+            session.status == UiStatus.ERROR -> TileRender(
                 state = Tile.STATE_INACTIVE,
                 subtitle = "点按重试",
                 action = TileAction.START,
             )
 
-            UiStatus.READY -> TileRender(
+            else -> TileRender(
                 state = Tile.STATE_INACTIVE,
                 subtitle = "点按共享",
                 action = TileAction.START,
@@ -44,8 +44,9 @@ object SessionTile {
         }
     }
 
-    private fun unavailable(shizuku: ShizukuState) = TileRender(
-        state = Tile.STATE_UNAVAILABLE,
+    private fun needsSetup(shizuku: ShizukuState) = TileRender(
+        // STATE_UNAVAILABLE prevents SystemUI from delivering onClick at all.
+        state = Tile.STATE_INACTIVE,
         subtitle = describe(shizuku),
         action = TileAction.OPEN_APP,
     )
