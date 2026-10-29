@@ -62,8 +62,8 @@ android {
 
         minSdk = 30
         targetSdk = 35
-        versionCode = 12
-        versionName = "1.2.9-adb"
+        versionCode = 13
+        versionName = "1.2.10-adb"
         testInstrumentationRunner = "dev.shizzi.AdbRuntimeInstrumentation"
 
         buildConfigField("int", "SERVICE_BUILD_ID", "${sourceFingerprint(projectDir)}")

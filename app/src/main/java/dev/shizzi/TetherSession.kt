@@ -89,17 +89,13 @@ class TetherSession(private val context: Context) {
         }.onFailure { SessionLog.warn("upstream callback unavailable; using dumpsys") }.getOrNull()
         preferTestNetworks()
 
-        ensureDownstreamStarted()
-        startHotspotWatchdog(generation, hotspotClosed)
-        requireHotspotOpen()
-        check(confirmTetheringUpstream(
-            checkSelected = { awaitUpstream(name) },
-            recoverOnce = {
-                requireHotspotOpen()
-                SessionLog.warn("upstream did not switch; restarting Wi-Fi hotspot once")
+        check(restartAndConfirmTetheringUpstream(
+            restartHotspot = {
+                SessionLog.info("preparing downstream: restarting Wi-Fi hotspot before upstream confirmation")
                 restartHotspotForHandover()
             },
-        )) { "verifyUpstream: test network was not selected after hotspot recovery" }
+            checkSelected = { awaitUpstream(name) },
+        )) { "verifyUpstream: test network was not selected after hotspot restart" }
         SessionLog.info("upstream verified: $name is sole upstream")
         requireHotspotOpen()
 
@@ -254,17 +250,20 @@ class TetherSession(private val context: Context) {
     private fun observeUpstream(): UpstreamObservation = upstreamMonitor?.observe() ?: inspector.observe()
 
     private fun restartHotspotForHandover() {
-        // Ignore only our deliberate AP transition; an old callback must not stop the recovery.
+        // Ignore our deliberate AP transition; an old callback must not stop the new session.
         val previous = hotspotWatchdog
         hotspotWatchdog = null
         previous?.stop()
         hotspotClosed = AtomicBoolean(false)
-        check(control.stopWifiTethering()) { "热点恢复失败：无法关闭热点" }
-        val deadline = SystemClock.elapsedRealtime() + DOWNSTREAM_SETTLE_MS
-        while (control.wifiHotspotState() == WifiHotspotState.DISABLING && SystemClock.elapsedRealtime() < deadline) {
-            Thread.sleep(DOWNSTREAM_POLL_MS)
+        val current = control.wifiHotspotState()
+        if (current != WifiHotspotState.DISABLED && current != WifiHotspotState.FAILED) {
+            check(control.stopWifiTethering()) { "热点重启失败：无法关闭热点" }
+            val deadline = SystemClock.elapsedRealtime() + DOWNSTREAM_SETTLE_MS
+            while (control.wifiHotspotState() == WifiHotspotState.DISABLING && SystemClock.elapsedRealtime() < deadline) {
+                Thread.sleep(DOWNSTREAM_POLL_MS)
+            }
+            check(control.wifiHotspotState() == WifiHotspotState.DISABLED) { "热点重启失败：等待热点关闭超时" }
         }
-        check(control.wifiHotspotState() == WifiHotspotState.DISABLED) { "热点恢复失败：等待热点关闭超时" }
         ensureDownstreamStarted()
         startHotspotWatchdog(generation, hotspotClosed)
     }

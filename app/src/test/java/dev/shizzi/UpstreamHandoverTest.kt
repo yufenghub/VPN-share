@@ -4,27 +4,35 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class UpstreamHandoverTest {
-    @Test fun `a working upstream never restarts the hotspot`() {
-        assertTrue(confirmTetheringUpstream({ true }, { fail("unnecessary hotspot restart") }))
+    @Test fun `restart precedes verification even if the old upstream looks ready`() {
+        val events = mutableListOf<String>()
+        assertTrue(restartAndConfirmTetheringUpstream(
+            restartHotspot = { events += "restart" },
+            checkSelected = { events += "verify"; true },
+        ))
+        assertEquals(listOf("restart", "verify"), events)
     }
 
-    @Test fun `a stale upstream can recover once`() {
+    @Test fun `a failed verification does not trigger another restart`() {
         var checks = 0
         var restarts = 0
-        assertTrue(confirmTetheringUpstream({ ++checks == 2 }, { restarts++ }))
+        assertFalse(restartAndConfirmTetheringUpstream({ restarts++ }, { checks++; false }))
         assertEquals(1, restarts)
+        assertEquals(1, checks)
     }
 
-    @Test fun `a failed recovery cannot loop or claim success`() {
-        var restarts = 0
-        assertFalse(confirmTetheringUpstream({ false }, { restarts++ }))
-        assertEquals(1, restarts)
-    }
-
-    @Test fun `user closing the hotspot aborts without reopening it`() {
-        assertThrows(HotspotClosedException::class.java) {
-            confirmTetheringUpstream({ throw HotspotClosedException() }, { fail("reopened after user stopped") })
+    @Test fun `a failed restart cannot be reported as a successful handover`() {
+        assertThrows(IllegalStateException::class.java) {
+            restartAndConfirmTetheringUpstream({ error("restart failed") }, { fail("verified after failed restart"); true })
         }
+    }
+
+    @Test fun `user closing the hotspot during verification does not restart it again`() {
+        var restarts = 0
+        assertThrows(HotspotClosedException::class.java) {
+            restartAndConfirmTetheringUpstream({ restarts++ }, { throw HotspotClosedException() })
+        }
+        assertEquals(1, restarts)
     }
 
     @Test fun `a different system reported network cannot be filtered into an absent reading`() {
